@@ -43,7 +43,8 @@ class EvaluationMetricsTest {
 
     @Test
     void matchRate_halfMatch_returns50Percent() {
-        metrics.incrementShadowExecuted().incrementShadowExecuted();
+        
+        metrics.incrementShadowExecuted();
         metrics.recordEvaluationResult(EvaluationResult.MATCH);
         metrics.incrementShadowExecuted();
         metrics.recordEvaluationResult(EvaluationResult.MISMATCH);
