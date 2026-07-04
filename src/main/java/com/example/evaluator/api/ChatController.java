@@ -52,7 +52,7 @@ public class ChatController {
     public ResponseEntity<LlmChatResponse> chat(@RequestBody @Valid ChatRequest request) {
         String correlationId = UUID.randomUUID().toString();
         metrics.incrementRequestsTotal();
-
+        log.info("testing CI/CD");
         log.info("[{}] Received chat request, model={}", correlationId, request.model());
 
         LlmChatResponse primaryResponse = primaryClient.chat(request);
