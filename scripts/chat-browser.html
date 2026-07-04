@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Evaluator — Chat Tester</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    input, textarea, button { width: 100%; box-sizing: border-box; margin-top: 0.25rem; }
+    textarea { min-height: 100px; font-family: monospace; }
+    pre { background: #111; color: #0f0; padding: 1rem; overflow: auto; border-radius: 6px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    button { padding: 0.75rem; font-size: 1rem; cursor: pointer; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>LLM Evaluator Chat API</h1>
+  <p>Browser tester for <code>POST /v1/chat</code> (address bar URLs only do GET — use this page instead).</p>
+
+  <label>API Base URL</label>
+  <input id="baseUrl" value="https://llm-evaluator-api-t9qud.ondigitalocean.app" />
+
+  <label>Message</label>
+  <textarea id="message">Respond with JSON only: {"action":"greet","text":"Hello"}</textarea>
+
+  <div class="row">
+    <button type="button" onclick="sendChat()">Send Chat (POST /v1/chat)</button>
+    <button type="button" onclick="getMetrics()">Get Metrics</button>
+  </div>
+
+  <h2>Response</h2>
+  <pre id="output">Click a button above…</pre>
+
+  <script>
+    const out = document.getElementById('output');
+
+    async function sendChat() {
+      const base = document.getElementById('baseUrl').value.replace(/\/$/, '');
+      const message = document.getElementById('message').value;
+      out.textContent = 'Sending…';
+
+      try {
+        const res = await fetch(base + '/v1/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: message }] })
+        });
+        const text = await res.text();
+        out.textContent =
+          'HTTP ' + res.status + '\n' +
+          'X-Request-Id: ' + (res.headers.get('X-Request-Id') || '(none)') + '\n\n' +
+          text;
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function getMetrics() {
+      const base = document.getElementById('baseUrl').value.replace(/\/$/, '');
+      out.textContent = 'Loading metrics…';
+      try {
+        const res = await fetch(base + '/metrics');
+        const text = await res.text();
+        out.textContent = 'HTTP ' + res.status + '\n\n' + text;
+      } catch (e) {
+        out.textContent = 'Error: ' + e.message;
+      }
+    }
+  </script>
+</body>
+</html>

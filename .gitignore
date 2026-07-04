@@ -4,3 +4,12 @@ target/
 !.mvn/wrapper/maven-wrapper.jar
 .env
 *.env.*
+
+# Local Docker config from registry login workaround (Windows)
+.docker-do/
+
+# Ad-hoc build logs
+docker-build.log
+
+# Local invoke scripts / overrides with personal URLs or tokens (samples live in scripts/)
+scripts/local/
