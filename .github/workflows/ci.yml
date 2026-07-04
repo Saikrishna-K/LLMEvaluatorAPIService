@@ -94,12 +94,10 @@ jobs:
         with:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
-      - name: Update App Platform deployment
-        # Uses the DO_APP_ID secret to trigger a re-deploy with the new image.
-        # The app spec (.do/app.yaml) defines the target image tag as "latest"
-        # which was just pushed by the previous job.
-        run: |
-          doctl apps update ${{ secrets.DO_APP_ID }} --spec .do/app.yaml
+      - name: Deploy to App Platform
+        # Redeploy using the app config already stored in DO (no .do/app.yaml in repo).
+        # Requires the App Platform app to use image tag "latest" from DOCR.
+        run: doctl apps create-deployment ${{ secrets.DO_APP_ID }}
 
       - name: Wait for deployment
         run: |
