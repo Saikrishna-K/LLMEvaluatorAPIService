@@ -144,6 +144,155 @@ Triggers shadow evaluation against the candidate LLM in the background.
 
 Shadow failures (`shadow_errors`, `shadow_timeouts`, `shadow_dropped`) **never** change the HTTP status code.
 
+> **Note:** `/v1/chat` requires **POST** with a JSON body. Opening the URL in a browser (GET) returns `500 INTERNAL_ERROR`.
+
+---
+
+## Live E2E Demo (Production)
+
+Use this section to walk an interviewer through the deployed system end-to-end.
+
+### Production base URL
+
+```
+https://llm-evaluator-api-t9qud.ondigitalocean.app
+```
+
+| Endpoint | Method | Browser URL? | Purpose |
+|----------|--------|--------------|---------|
+| `/actuator/health` | GET | Yes | Liveness — DO App Platform health check |
+| `/metrics` | GET | Yes | Real-time counters + exact match rate |
+| `/v1/chat` | **POST** | **No** — use script or Postman | Sync primary LLM + async shadow eval |
+
+### E2E flow (what happens on one chat request)
+
+```
+1. Client  ──POST /v1/chat──►  API (sync path)
+2. API     ──sync call──────►  Primary LLM  (DO Serverless Inference, llama3.3-70b-instruct)
+3. API     ◄──response──────   Primary LLM
+4. API     ──200 + body────►  Client          ← immediate return (user never waits for candidate)
+5. API     ──fire-and-forget► BoundedShadowExecutor
+6. Worker  ──async call─────►  Candidate LLM  (llama3.1-8b-instruct)
+7. Worker  ──evaluate───────►  ActionFieldEvaluator (exact match on JSON "action" field)
+8. Worker  ──increment──────►  EvaluationMetrics (requests_total, shadow_executed, exact_match_count, …)
+```
+
+### Step 1 — Health check
+
+**Request:** open in browser or:
+
+```powershell
+Invoke-RestMethod "https://llm-evaluator-api-t9qud.ondigitalocean.app/actuator/health"
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "status": "UP",
+  "components": {
+    "diskSpace": { "status": "UP" },
+    "livenessState": { "status": "UP" },
+    "readinessState": { "status": "UP" }
+  }
+}
+```
+
+### Step 2 — Chat (primary path)
+
+**Request:**
+
+```powershell
+$base = "https://llm-evaluator-api-t9qud.ondigitalocean.app"
+$body = '{"messages":[{"role":"user","content":"Respond with JSON only: {\"action\":\"greet\",\"text\":\"Hello\"}"}]}'
+
+Invoke-RestMethod -Uri "$base/v1/chat" -Method POST -ContentType "application/json" -Body $body
+```
+
+Or run the committed script:
+
+```powershell
+.\scripts\invoke-chat.ps1
+```
+
+Or open `scripts/chat-browser.html` in a browser and click **Send Chat**.
+
+**Response `200 OK` (example from live deployment):**
+
+```json
+{
+  "id": "chatcmpl-4f65c2cd-9c7e-4ada-a4c1-daf51777bcfe",
+  "object": "chat.completion",
+  "created": 1783161442,
+  "model": "llama3.3-70b-instruct",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "{\"action\":\"respond\",\"text\":\"Hello, how are you?\"}"
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 15,
+    "total_tokens": 65
+  }
+}
+```
+
+**Response header:**
+
+| Header | Example | Use |
+|--------|---------|-----|
+| `X-Request-Id` | `0bb3c357-7908-4c2c-8b83-0dd66b573676` | Correlate with shadow evaluation logs |
+
+The client receives the **primary** response only. Shadow evaluation runs in the background.
+
+### Step 3 — Metrics (after ~5–8 seconds)
+
+**Request:**
+
+```powershell
+Invoke-RestMethod "https://llm-evaluator-api-t9qud.ondigitalocean.app/metrics"
+```
+
+**Response `200 OK` (example after one chat call):**
+
+```json
+{
+  "timestamp": "2026-07-04T10:37:31.727248990Z",
+  "requests_total": 1,
+  "shadow_executed": 1,
+  "shadow_dropped": 0,
+  "shadow_errors": 0,
+  "shadow_timeouts": 0,
+  "exact_match_count": 1,
+  "exact_match_rate_percent": 100.0
+}
+```
+
+| Metric | Meaning |
+|--------|---------|
+| `requests_total` | All `POST /v1/chat` calls received |
+| `shadow_executed` | Background evaluations that started |
+| `shadow_dropped` | Shed under load (queue full) — never affects HTTP status |
+| `shadow_errors` | Candidate LLM or parse failures |
+| `shadow_timeouts` | Candidate call exceeded timeout |
+| `exact_match_count` | Primary vs candidate `action` field matched |
+| `exact_match_rate_percent` | `exact_match_count / shadow_executed × 100` |
+
+### Error responses (live)
+
+| Status | When | Example body |
+|--------|------|----------------|
+| `400` | Missing/invalid `messages` | `{"error":"VALIDATION_ERROR","message":"messages: must not be empty",...}` |
+| `502` | Primary LLM error (e.g. bad API key) | `{"error":"BAD_GATEWAY","message":"Primary LLM returned an error",...}` |
+| `504` | Primary LLM timeout | `{"error":"GATEWAY_TIMEOUT","message":"Primary LLM did not respond in time",...}` |
+| `500` | GET on `/v1/chat` (browser URL bar) | `{"error":"INTERNAL_ERROR","message":"An unexpected error occurred",...}` |
+
+Shadow failures never change the chat HTTP status — they appear only in `/metrics`.
+
 ---
 
 ### GET /metrics
@@ -253,30 +402,89 @@ Tune `SHADOW_QUEUE_CAPACITY`, `SHADOW_POOL_CORE_SIZE`, `SHADOW_POOL_MAX_SIZE` ba
 
 ---
 
-## Running Tests
+## Test Suite
+
+**Total: 40 automated tests** — 34 unit (Surefire) + 6 integration (Failsafe).  
+All LLM calls in tests use **WireMock** stubs — no real API keys or network in CI.
 
 ```bash
-# All unit tests + integration tests (Failsafe)
-mvn verify
-
-# Unit tests only
-mvn test
-
-# Integration tests only
-mvn failsafe:integration-test failsafe:verify
+mvn verify          # all tests
+mvn test            # unit only
+mvn failsafe:integration-test failsafe:verify   # integration only
 ```
 
-Integration tests use **WireMock** to stub both LLM endpoints — no real API keys or network access needed in CI.
+### Unit tests — `ActionFieldEvaluatorTest` (10 tests)
 
-**Test coverage:**
+Phase 2 evaluator: extracts `"action"` from JSON and exact-matches.
 
-| Test class | What it covers |
-|------------|----------------|
-| `JsonEqualityEvaluatorTest` | Match, mismatch, both/one unparseable, markdown fences |
-| `ActionFieldEvaluatorTest` | Same/different action, missing action, null, case sensitivity |
-| `EvaluationMetricsTest` | All counters, match rate edge cases (zero denominator), timestamp |
-| `BoundedShadowExecutorTest` | Acceptance, queue saturation, multiple drops, task execution |
-| `ChatControllerIT` | Happy path, mismatch, primary down, invalid request, candidate error, metrics endpoint |
+| Test | Scenario | Expected |
+|------|----------|----------|
+| `sameAction_returnsMatch` | Same `action`, different other fields | `MATCH` |
+| `differentAction_returnsMismatch` | Different `action` values | `MISMATCH` |
+| `actionIsCaseSensitive` | `"Greet"` vs `"greet"` | `MISMATCH` |
+| `missingActionInPrimary_returnsPrimaryUnparseable` | No `action` in primary | `PRIMARY_UNPARSEABLE` |
+| `missingActionInCandidate_returnsCandidateUnparseable` | No `action` in candidate | `CANDIDATE_UNPARSEABLE` |
+| `nullActionValue_returnsUnparseable` | `"action": null` | `PRIMARY_UNPARSEABLE` |
+| `nonStringAction_returnsUnparseable` | `"action": 42` | `PRIMARY_UNPARSEABLE` |
+| `bothUnparseable_returnsBothUnparseable` | Both invalid JSON | `BOTH_UNPARSEABLE` |
+| `nullInputs_returnsBothUnparseable` | Null content strings | `BOTH_UNPARSEABLE` |
+| `markdownFencedJson_extractsActionCorrectly` | JSON wrapped in ` ```json ` fences | `MATCH` |
+
+### Unit tests — `JsonEqualityEvaluatorTest` (12 tests)
+
+Phase 1 evaluator: deep JSON structural equality.
+
+| Test | Scenario | Expected |
+|------|----------|----------|
+| `identicalJsonObjects_returnsMatch` | Identical JSON objects | `MATCH` |
+| `differentFieldValues_returnsMismatch` | Different field values | `MISMATCH` |
+| `extraFieldInCandidate_returnsMismatch` | Extra field in candidate | `MISMATCH` |
+| `bothUnparseable_returnsBothUnparseable` | Both invalid JSON | `BOTH_UNPARSEABLE` |
+| `primaryUnparseable_returnsPrimaryUnparseable` | Primary not JSON | `PRIMARY_UNPARSEABLE` |
+| `candidateUnparseable_returnsCandidateUnparseable` | Candidate not JSON | `CANDIDATE_UNPARSEABLE` |
+| `nullPrimary_returnsPrimaryUnparseable` | Null primary | `PRIMARY_UNPARSEABLE` |
+| `blankBoth_returnsBothUnparseable` | Empty/blank strings | `BOTH_UNPARSEABLE` |
+| `markdownFencedJson_strippedAndMatches` | Markdown code fences stripped | `MATCH` |
+| `jsonArrays_matchWhenEqual` | Equal JSON arrays | `MATCH` |
+| `stripMarkdownFences_removesCodeBlock` | Fence stripping utility | Correct string |
+| `stripMarkdownFences_noFences_returnsUnchanged` | Plain JSON unchanged | Correct string |
+
+### Unit tests — `EvaluationMetricsTest` (8 tests)
+
+| Test | Scenario |
+|------|----------|
+| `initialState_allCountersAreZero` | Fresh metrics all zero |
+| `matchRate_zeroExecuted_returnsZeroPercent` | No division-by-zero |
+| `matchRate_allMatch_returns100Percent` | 1/1 = 100% |
+| `matchRate_halfMatch_returns50Percent` | 1/2 = 50% |
+| `recordEvaluationResult_mismatch_doesNotIncrementMatchCount` | Mismatch ≠ match |
+| `recordEvaluationResult_unparseablePrimary_doesNotIncrementMatchCount` | Unparseable ≠ match |
+| `allCounters_incrementCorrectly` | All AtomicLong counters work |
+| `getSummary_includesNonNullTimestamp` | Snapshot has ISO timestamp |
+
+### Unit tests — `BoundedShadowExecutorTest` (4 tests)
+
+Load-shedding and bounded queue behavior.
+
+| Test | Scenario |
+|------|----------|
+| `submit_withinCapacity_accepted` | Task accepted when queue has room |
+| `submit_overCapacity_taskIsDropped` | Full queue → task shed, `shadow_dropped++` |
+| `droppedCounter_incrementsOnEachShedTask` | Multiple sheds increment counter |
+| `submit_tasksExecute_completeSuccessfully` | Accepted tasks run to completion |
+
+### Integration tests — `ChatControllerIT` (6 tests)
+
+Full HTTP flow via `@SpringBootTest` + WireMock stubbing both LLM endpoints.
+
+| Test | Scenario | Asserts |
+|------|----------|---------|
+| `happyPath_actionMatch_returns200AndIncrementsMatchCount` | Primary + candidate same `action` | `200`, `X-Request-Id`, `exact_match_count++` |
+| `actionMismatch_returns200ButMismatchCounted` | Different `action` values | `200`, match count unchanged |
+| `primaryDown_returns502` | Primary LLM returns 503 | `502 BAD_GATEWAY` |
+| `invalidRequest_missingMessages_returns400` | Empty/missing `messages` | `400 VALIDATION_ERROR` |
+| `metricsEndpoint_returnsAllFields` | GET `/metrics` after chat | All 8 metric fields present |
+| `candidateError_shadowErrorCounted_primaryResponseUnaffected` | Candidate 500, primary OK | Chat `200`, `shadow_errors++` |
 
 ---
 
@@ -289,7 +497,7 @@ push to main
     │
     ▼
 [test] ──(pass)──► [build-and-push] ──► [deploy]
-    │                (Docker image          (doctl apps update)
+    │                (Docker image          (doctl apps create-deployment)
     │               pushed to DOCR)
     ▼
 [fail] → pipeline stops, nothing deployed
@@ -304,8 +512,8 @@ Set these in **Settings → Secrets and variables → Actions**:
 | Secret | Value |
 |--------|-------|
 | `DIGITALOCEAN_ACCESS_TOKEN` | Your DO personal access token |
-| `DO_REGISTRY_NAME` | Your DO Container Registry name (e.g. `my-registry`) |
-| `DO_APP_ID` | App Platform App ID (from `doctl apps list`) |
+| `DO_REGISTRY_NAME` | `llmevaluator` |
+| `DO_APP_ID` | `22663ce9-2cba-4779-aefc-75969f1b5745` |
 
 Runtime secrets (`DO_INFERENCE_API_KEY`, `CANDIDATE_LLM_API_KEY`) are set **only in the DO App Platform console** — they never touch GitHub.
 
@@ -313,46 +521,25 @@ Runtime secrets (`DO_INFERENCE_API_KEY`, `CANDIDATE_LLM_API_KEY`) are set **only
 
 ## Deployment to DigitalOcean
 
-### Step-by-step first deploy
-
-```bash
-# 1. Install doctl
-brew install doctl                    # macOS
-# or download from https://docs.digitalocean.com/reference/doctl/
-
-# 2. Authenticate
-doctl auth init --access-token YOUR_DO_TOKEN
-
-# 3. Create a container registry (one-time)
-doctl registry create my-registry
-
-# 4. Build and push image manually (first time)
-doctl registry login
-docker build -t registry.digitalocean.com/my-registry/llm-evaluator:latest .
-docker push registry.digitalocean.com/my-registry/llm-evaluator:latest
-
-# 5. Edit .do/app.yaml — replace ${DO_REGISTRY_NAME} with your registry name
-
-# 6. Create the app
-doctl apps create --spec .do/app.yaml
-
-# 7. Set the runtime secrets (one-time, via DO console or doctl)
-#    Go to: Apps → llm-evaluator-api → Settings → Environment Variables
-#    Set: DO_INFERENCE_API_KEY, CANDIDATE_LLM_API_KEY
-
-# 8. Get your App ID for GitHub Actions
-doctl apps list
-```
-
-After the first deploy, every push to `main` triggers the full pipeline automatically.
-
 ### Live URLs
 
-| Endpoint | URL pattern |
-|----------|-------------|
-| Chat | `https://llm-evaluator-api-xxxxx.ondigitalocean.app/v1/chat` |
-| Metrics | `https://llm-evaluator-api-xxxxx.ondigitalocean.app/metrics` |
-| Health | `https://llm-evaluator-api-xxxxx.ondigitalocean.app/actuator/health` |
+| Endpoint | URL |
+|----------|-----|
+| Chat | `POST https://llm-evaluator-api-t9qud.ondigitalocean.app/v1/chat` |
+| Metrics | `GET https://llm-evaluator-api-t9qud.ondigitalocean.app/metrics` |
+| Health | `GET https://llm-evaluator-api-t9qud.ondigitalocean.app/actuator/health` |
+
+See **[Live E2E Demo (Production)](#live-e2e-demo-production)** for sample requests and responses.
+
+### First deploy (manual, one-time)
+
+App config (env vars, instance size, inference keys) is managed in the **DO App Platform console** after initial setup:
+
+1. `doctl registry create llmevaluator`
+2. `docker build` + `docker push registry.digitalocean.com/llmevaluator/llm-evaluator:latest`
+3. Create app in DO Console → point to DOCR image `llm-evaluator:latest`
+4. Set `DO_INFERENCE_API_KEY` and `CANDIDATE_LLM_API_KEY` (Model Access Keys)
+5. Subsequent deploys: push to `main` (GitHub Actions) or `doctl apps create-deployment <APP_ID>`
 
 ---
 
