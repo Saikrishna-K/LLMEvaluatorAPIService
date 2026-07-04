@@ -1,0 +1,67 @@
+server:
+  port: ${PORT:8080}
+
+spring:
+  application:
+    name: llm-evaluator-api
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: false
+    serialization:
+      write-dates-as-timestamps: false
+
+# ---------------------------------------------------------------------------
+# LLM client configuration
+# Primary  → DO Serverless Inference (sync, user-facing)
+# Candidate → configurable (async, shadow only)
+# All secrets injected via env vars — never hard-coded here.
+# ---------------------------------------------------------------------------
+llm:
+  primary:
+    base-url: ${DO_INFERENCE_BASE_URL:https://inference.do-ai.run}
+    api-key: ${DO_INFERENCE_API_KEY:changeme}
+    default-model: ${PRIMARY_LLM_MODEL:llama3.3-70b-instruct}
+    timeout-ms: ${PRIMARY_LLM_TIMEOUT_MS:30000}
+  candidate:
+    base-url: ${CANDIDATE_LLM_BASE_URL:https://inference.do-ai.run}
+    api-key: ${CANDIDATE_LLM_API_KEY:${DO_INFERENCE_API_KEY:changeme}}
+    default-model: ${CANDIDATE_LLM_MODEL:llama3.1-8b-instruct}
+    timeout-ms: ${CANDIDATE_LLM_TIMEOUT_MS:60000}
+
+# ---------------------------------------------------------------------------
+# Shadow executor / load-shedding configuration
+#
+# queue-capacity : max pending tasks before shedding (drop) occurs
+# pool-core-size : always-on worker threads
+# pool-max-size  : burst ceiling (each thread ~1 MB stack)
+#
+# Memory budget for shadow pool on a 2 GB instance (basic-s):
+#   JVM heap (-Xmx1g)    : 1024 MB
+#   Metaspace            :  ~100 MB
+#   Thread stacks (16×1) :   ~16 MB
+#   Queue (500×~50 KB)   :   ~25 MB
+#   WebClient pools      :   ~30 MB
+#   OS / JVM native      :  ~150 MB
+#   Total                : ~1345 MB  (comfortable on 2 GB)
+#
+# evaluation-mode: "action-field" (Phase 2) or "json-equality" (Phase 1)
+# ---------------------------------------------------------------------------
+shadow:
+  queue-capacity: ${SHADOW_QUEUE_CAPACITY:500}
+  pool-core-size: ${SHADOW_POOL_CORE_SIZE:4}
+  pool-max-size: ${SHADOW_POOL_MAX_SIZE:16}
+  evaluation-mode: ${SHADOW_EVAL_MODE:action-field}
+
+# Expose only /actuator/health (used by DO health check); not /actuator/metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example.evaluator: INFO

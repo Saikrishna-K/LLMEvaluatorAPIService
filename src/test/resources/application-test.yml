@@ -1,0 +1,20 @@
+# Test profile overrides — WireMock base URLs are injected via @DynamicPropertySource
+llm:
+  primary:
+    api-key: test-primary-key
+    default-model: llama3.3-70b-instruct
+    timeout-ms: 5000
+  candidate:
+    api-key: test-candidate-key
+    default-model: llama3.1-8b-instruct
+    timeout-ms: 5000
+
+shadow:
+  queue-capacity: 100
+  pool-core-size: 2
+  pool-max-size: 4
+  evaluation-mode: action-field
+
+logging:
+  level:
+    com.example.evaluator: DEBUG
